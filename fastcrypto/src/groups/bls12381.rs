@@ -5,7 +5,7 @@ use crate::bls12381::min_pk::DST_G2;
 use crate::bls12381::min_sig::DST_G1;
 use crate::error::{FastCryptoError, FastCryptoResult};
 use crate::groups::{
-    GroupElement, HashToGroupElement, MultiScalarMul, Pairing, Scalar as ScalarType,
+    FixedInputPairing, GroupElement, HashToGroupElement, MultiScalarMul, Pairing, Scalar as ScalarType,
 };
 use crate::serde_helpers::BytesRepresentation;
 use crate::serde_helpers::ToFromByteArray;
@@ -14,15 +14,16 @@ use crate::utils::log2_byte;
 use crate::{generate_bytes_representation, serialize_deserialize_with_to_from_byte_array};
 use blst::{
     blst_bendian_from_scalar, blst_final_exp, blst_fp, blst_fp12, blst_fp12_inverse, blst_fp12_mul,
-    blst_fp12_one, blst_fp12_sqr, blst_fp_from_bendian, blst_fr, blst_fr_add, blst_fr_cneg,
-    blst_fr_from_scalar, blst_fr_inverse, blst_fr_mul, blst_fr_rshift, blst_fr_sub,
-    blst_hash_to_g1, blst_hash_to_g2, blst_lendian_from_scalar, blst_miller_loop, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_deserialize,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_mult, blst_p1_to_affine, blst_p2,
-    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_deserialize,
-    blst_p2_from_affine, blst_p2_in_g2, blst_p2_mult, blst_p2_to_affine, blst_scalar,
-    blst_scalar_fr_check, blst_scalar_from_bendian, blst_scalar_from_fr, blst_scalar_from_lendian,
-    p1_affines, p2_affines, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_fp12_one, blst_fp12_sqr, blst_fp6, blst_fp_from_bendian, blst_fr, blst_fr_add,
+    blst_fr_cneg, blst_fr_from_scalar, blst_fr_inverse, blst_fr_mul, blst_fr_rshift, blst_fr_sub,
+    blst_hash_to_g1, blst_hash_to_g2, blst_lendian_from_scalar, blst_miller_loop,
+    blst_miller_loop_lines, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg,
+    blst_p1_compress, blst_p1_deserialize, blst_p1_from_affine, blst_p1_in_g1, blst_p1_mult,
+    blst_p1_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg,
+    blst_p2_compress, blst_p2_deserialize, blst_p2_from_affine, blst_p2_in_g2, blst_p2_mult,
+    blst_p2_to_affine, blst_precompute_lines, blst_scalar, blst_scalar_fr_check,
+    blst_scalar_from_bendian, blst_scalar_from_fr, blst_scalar_from_lendian, p1_affines,
+    p2_affines, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use derive_more::From;
 use fastcrypto_derive::GroupOpsExtend;
@@ -201,6 +202,40 @@ impl Pairing for G1Element {
             blst_final_exp(&mut res, &res);
         }
         <Self as Pairing>::Output::from(res)
+    }
+}
+
+#[cfg(feature = "experimental")]
+pub struct PrecomputedPairing {
+    lines: [blst_fp6; 68],
+}
+
+#[cfg(feature = "experimental")]
+impl FixedInputPairing for PrecomputedPairing {
+    type BaseType = G2Element;
+    type Input = G1Element;
+    type Output = GTElement;
+
+    fn new(base: &Self::BaseType) -> Self {
+        let mut g2_affine = blst_p2_affine::default();
+        let mut lines = [blst_fp6::default(); 68];
+        unsafe {
+            blst_p2_to_affine(&mut g2_affine, &base.0);
+            blst_precompute_lines(lines.as_mut_ptr(), &g2_affine);
+        };
+        Self { lines }
+    }
+
+    fn pairing(&self, input: &Self::Input) -> Self::Output {
+        let mut g1_affine = blst_p1_affine::default();
+
+        let mut res = blst_fp12::default();
+        unsafe {
+            blst_p1_to_affine(&mut g1_affine, &input.0);
+            blst_miller_loop_lines(&mut res, &self.lines[0], &g1_affine);
+            blst_final_exp(&mut res, &res);
+        }
+        GTElement::from(res)
     }
 }
 

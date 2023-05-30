@@ -63,3 +63,20 @@ pub trait HashToGroupElement {
 pub trait MultiScalarMul: GroupElement {
     fn multi_scalar_mul(scalars: &[Self::ScalarType], points: &[Self]) -> FastCryptoResult<Self>;
 }
+
+/// Trait for computing the pairing where one of the inputs is fixed.
+#[cfg(feature = "experimental")]
+pub trait FixedInputPairing {
+    /// Type of the fixed element
+    type BaseType: GroupElement;
+    /// Type of the variable input element
+    type Input: GroupElement;
+    /// Type of the output
+    type Output;
+
+    /// Create a new instance with the given base element.
+    fn new(base: &Self::BaseType) -> Self;
+
+    /// Compute the pairing of the input with the base element.
+    fn pairing(&self, input: &Self::Input) -> Self::Output;
+}

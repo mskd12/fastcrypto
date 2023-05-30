@@ -5,9 +5,9 @@ extern crate criterion;
 
 mod group_benches {
     use criterion::{measurement, BenchmarkGroup, Criterion};
-    use fastcrypto::groups::bls12381::{G1Element, G2Element, GTElement};
+    use fastcrypto::groups::bls12381::{G1Element, G2Element, GTElement, PrecomputedPairing};
     use fastcrypto::groups::ristretto255::RistrettoPoint;
-    use fastcrypto::groups::{GroupElement, HashToGroupElement, Pairing, Scalar};
+    use fastcrypto::groups::{FixedInputPairing, GroupElement, HashToGroupElement, Pairing, Scalar};
     use rand::thread_rng;
 
     fn add_single<G: GroupElement, M: measurement::Measurement>(
@@ -74,6 +74,16 @@ mod group_benches {
     fn pairing(c: &mut Criterion) {
         let mut group: BenchmarkGroup<_> = c.benchmark_group("Pairing");
         pairing_single::<G1Element, _>("BLS12381-G1", &mut group);
+
+        // Benchmark the pairing as above but with a fixed G2Element
+        let x = G1Element::generator()
+            * <G1Element as GroupElement>::ScalarType::rand(&mut thread_rng());
+        let y = <G1Element as Pairing>::Other::generator()
+            * <<G1Element as Pairing>::Other as GroupElement>::ScalarType::rand(&mut thread_rng());
+        let precomputed_pairing = PrecomputedPairing::new(&y);
+        group.bench_function("BLS12381-G1 (fixed G2)", move |b| {
+            b.iter(|| precomputed_pairing.pairing(&x))
+        });
     }
 
     criterion_group! {
