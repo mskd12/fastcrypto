@@ -1,38 +1,37 @@
 // Copyright (c) 2022, Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use ark_crypto_primitives::snark::SNARK;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 
-use super::{poseidon::PoseidonWrapper, verifier::process_vk_special};
-use crate::bn254::VerifyingKey as Bn254VerifyingKey;
+use super::poseidon::PoseidonWrapper;
 use crate::circom::CircomPublicInputs;
-use crate::{
-    bn254::verifier::PreparedVerifyingKey,
-    circom::{g1_affine_from_str_projective, g2_affine_from_str_projective},
-};
+use crate::circom::{g1_affine_from_str_projective, g2_affine_from_str_projective};
 pub use ark_bn254::{Bn254, Fr as Bn254Fr};
 pub use ark_ff::ToConstraintField;
-use ark_groth16::{Groth16, Proof, VerifyingKey};
+use ark_groth16::Proof;
 pub use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use fastcrypto::{
     error::FastCryptoError,
     rsa::{Base64UrlUnpadded, Encoding},
 };
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 use once_cell::sync::Lazy;
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::str::FromStr;
 
 #[cfg(test)]
 #[path = "unit_tests/zk_login_tests.rs"]
 mod zk_login_tests;
 
-static GLOBAL_VERIFYING_KEY: Lazy<PreparedVerifyingKey> = Lazy::new(global_pvk);
+const MAX_EXTENDED_ISS_LEN: u8 = 99;
+const MAX_EXTENDED_ISS_LEN_B64: u8 = 1 + (4 * (MAX_EXTENDED_ISS_LEN / 3));
+const MAX_EXTENDED_AUD_LEN: u8 = 99;
+const MAX_EXTENDED_AUD_LEN_B64: u8 = 1 + (4 * (MAX_EXTENDED_AUD_LEN / 3));
+const MAX_HEADER_LEN: u8 = 150;
+const PACK_WIDTH: u8 = 248;
 
 /// Hardcoded mapping from the provider and its supported key claim name to its map-to-field Big Int in string.
 /// The field value is computed from the max key claim length and its provider.
@@ -79,6 +78,21 @@ pub enum OAuthProvider {
     Twitch,
 }
 
+/// Struct that contains all the OAuth provider information. A list of them can
+/// be retrieved from the JWK endpoint (e.g. <https://www.googleapis.com/oauth2/v3/certs>)
+/// and published on the bulletin along with a trusted party's signature.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Hash, Serialize, Deserialize)]
+pub struct OAuthProviderContent {
+    ///d
+    pub kty: String,
+    ///d
+    pub e: String,
+    ///d
+    pub n: String,
+    ///d
+    pub alg: String,
+}
+
 impl OAuthProvider {
     /// Returns a tuple of iss string and JWK endpoint string for the given provider.
     pub fn get_config(&self) -> (&str, &str) {
@@ -123,124 +137,24 @@ impl fmt::Display for SupportedKeyClaim {
     }
 }
 
-/// Return whether the claim string is supported for zk login.
-pub fn is_claim_supported(claim_name: &str) -> bool {
-    vec![SupportedKeyClaim::Sub.to_string()].contains(&claim_name.to_owned())
-}
-
-/// Verify a zk login proof using the fixed verifying key.
-pub fn verify_zk_login_proof_with_fixed_vk(
-    proof: &ZkLoginProof,
-    public_inputs: &PublicInputs,
-) -> Result<bool, FastCryptoError> {
-    Groth16::<Bn254>::verify_with_processed_vk(
-        &GLOBAL_VERIFYING_KEY.as_arkworks_pvk(),
-        &public_inputs.as_arkworks(),
-        &proof.as_arkworks(),
-    )
-    .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
-}
-
-/// Load a fixed verifying key from zklogin.vkey output from setup
-/// https://github.com/MystenLabs/fastcrypto/blob/2a704431e4d2685625c0cc06d19fd7d08a4aafa4/openid-zkp-auth/README.md
-fn global_pvk() -> PreparedVerifyingKey {
-    // Convert the Circom G1/G2/GT to arkworks G1/G2/GT
-    let vk_alpha_1 = g1_affine_from_str_projective(vec![
-        "20491192805390485299153009773594534940189261866228447918068658471970481763042".to_string(),
-        "9383485363053290200918347156157836566562967994039712273449902621266178545958".to_string(),
-        "1".to_string(),
-    ]);
-    let vk_beta_2 = g2_affine_from_str_projective(vec![
-        vec![
-            "6375614351688725206403948262868962793625744043794305715222011528459656738731"
-                .to_string(),
-            "4252822878758300859123897981450591353533073413197771768651442665752259397132"
-                .to_string(),
-        ],
-        vec![
-            "10505242626370262277552901082094356697409835680220590971873171140371331206856"
-                .to_string(),
-            "21847035105528745403288232691147584728191162732299865338377159692350059136679"
-                .to_string(),
-        ],
-        vec!["1".to_string(), "0".to_string()],
-    ]);
-    let vk_gamma_2 = g2_affine_from_str_projective(vec![
-        vec![
-            "10857046999023057135944570762232829481370756359578518086990519993285655852781"
-                .to_string(),
-            "11559732032986387107991004021392285783925812861821192530917403151452391805634"
-                .to_string(),
-        ],
-        vec![
-            "8495653923123431417604973247489272438418190587263600148770280649306958101930"
-                .to_string(),
-            "4082367875863433681332203403145435568316851327593401208105741076214120093531"
-                .to_string(),
-        ],
-        vec!["1".to_string(), "0".to_string()],
-    ]);
-    let vk_delta_2 = g2_affine_from_str_projective(vec![
-        vec![
-            "10857046999023057135944570762232829481370756359578518086990519993285655852781"
-                .to_string(),
-            "11559732032986387107991004021392285783925812861821192530917403151452391805634"
-                .to_string(),
-        ],
-        vec![
-            "8495653923123431417604973247489272438418190587263600148770280649306958101930"
-                .to_string(),
-            "4082367875863433681332203403145435568316851327593401208105741076214120093531"
-                .to_string(),
-        ],
-        vec!["1".to_string(), "0".to_string()],
-    ]);
-
-    // Create a vector of G1Affine elements from the IC
-    let mut vk_gamma_abc_g1 = Vec::new();
-    for e in vec![
-        vec![
-            "18931764958316061396537365316410279129357566768168194299771466990652581507745"
-                .to_string(),
-            "19589594864158083697499253358172374190940731232487666687594341722397321059767"
-                .to_string(),
-            "1".to_string(),
-        ],
-        vec![
-            "6267760579143073538587735682191258967573139158461221609828687320377758856284"
-                .to_string(),
-            "18672820669757254021555424652581702101071897282778751499312181111578447239911"
-                .to_string(),
-            "1".to_string(),
-        ],
-    ] {
-        let g1 = g1_affine_from_str_projective(e);
-        vk_gamma_abc_g1.push(g1);
-    }
-
-    let vk = VerifyingKey {
-        alpha_g1: vk_alpha_1,
-        beta_g2: vk_beta_2,
-        gamma_g2: vk_gamma_2,
-        delta_g2: vk_delta_2,
-        gamma_abc_g1: vk_gamma_abc_g1,
-    };
-    process_vk_special(&Bn254VerifyingKey(vk))
+/// Necessary value for claim.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct Claim {
+    name: String,
+    value_base64: String,
+    index_mod_4: u8,
 }
 
 /// A parsed result of all aux inputs.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct AuxInputs {
+    claims: Vec<Claim>,
+    header_base64: String,
     addr_seed: String,
     eph_public_key: Vec<String>,
-    jwt_sha2_hash: Vec<String>,
-    jwt_signature: String,
-    key_claim_name: String,
-    masked_content: Vec<u8>,
     max_epoch: u64,
-    num_sha2_blocks: u8,
-    payload_len: u16,
-    payload_start_index: u16,
+    key_claim_name: String,
+    modulus: String,
     #[serde(skip)]
     parsed_masked_content: ParsedMaskedContent,
 }
@@ -250,50 +164,20 @@ impl AuxInputs {
     pub fn from_json(value: &str) -> Result<Self, FastCryptoError> {
         let mut inputs: AuxInputs =
             serde_json::from_str(value).map_err(|_| FastCryptoError::InvalidInput)?;
-        inputs.parsed_masked_content = ParsedMaskedContent::new(
-            &inputs.masked_content,
-            inputs.payload_start_index,
-            inputs.payload_len,
-            inputs.num_sha2_blocks,
-        )?;
+        inputs.parsed_masked_content =
+            ParsedMaskedContent::new(&inputs.header_base64, &inputs.claims)?;
         Ok(inputs)
     }
 
     /// Init ParsedMaskedContent
     pub fn init(&mut self) -> Result<Self, FastCryptoError> {
-        self.parsed_masked_content = ParsedMaskedContent::new(
-            &self.masked_content,
-            self.payload_start_index,
-            self.payload_len,
-            self.num_sha2_blocks,
-        )?;
+        self.parsed_masked_content = ParsedMaskedContent::new(&self.header_base64, &self.claims)?;
         Ok(self.to_owned())
-    }
-    /// Get the jwt hash in byte array format.
-    pub fn get_jwt_hash(&self) -> Vec<u8> {
-        self.jwt_sha2_hash
-            .iter()
-            .flat_map(|x| big_int_str_to_bytes(x))
-            .collect()
-    }
-
-    /// Get the ephemeral pubkey in bytes.
-    pub fn get_eph_pub_key(&self) -> Vec<u8> {
-        self.eph_public_key
-            .iter()
-            .flat_map(|x| big_int_str_to_bytes(x))
-            .collect()
     }
 
     /// Get the max epoch value.
     pub fn get_max_epoch(&self) -> u64 {
         self.max_epoch
-    }
-
-    /// Get jwt signature in bytes.
-    pub fn get_jwt_signature(&self) -> Result<Vec<u8>, FastCryptoError> {
-        Base64UrlUnpadded::decode_vec(&self.jwt_signature)
-            .map_err(|_| FastCryptoError::InvalidInput)
     }
 
     /// Get the address seed in string.
@@ -306,66 +190,201 @@ impl AuxInputs {
         self.parsed_masked_content.get_iss()
     }
 
+    /// Get the iss string.
+    pub fn get_iss_str(&self) -> &str {
+        self.parsed_masked_content.get_iss_str()
+    }
+
+    /// Get the iss string.
+    pub fn get_aud_str(&self) -> &str {
+        self.parsed_masked_content.get_aud_str()
+    }
+
     /// Get the client id string.
-    pub fn get_client_id(&self) -> &str {
-        self.parsed_masked_content.get_client_id()
+    pub fn get_aud(&self) -> &str {
+        self.parsed_masked_content.get_aud()
+    }
+
+    /// Get the iss index.
+    pub fn get_iss_index(&self) -> u8 {
+        self.parsed_masked_content.get_iss_index()
+    }
+
+    /// Get the aud index.
+    pub fn get_aud_index(&self) -> u8 {
+        self.parsed_masked_content.get_aud_index()
+    }
+
+    /// Get the aud index.
+    pub fn get_claim_name(&self) -> &str {
+        &self.key_claim_name
+    }
+
+    /// Get the header base64 string.
+    pub fn get_header(&self) -> &str {
+        self.parsed_masked_content.get_header()
     }
 
     /// Get the kid string.
     pub fn get_kid(&self) -> &str {
-        self.parsed_masked_content.get_kid()
+        &self.parsed_masked_content.kid
     }
 
-    /// Get the key claim name string.
-    pub fn get_claim_name(&self) -> &str {
-        &self.key_claim_name
+    /// Get the modulus
+    pub fn get_mod(&self) -> &str {
+        &self.modulus
     }
 
     /// Calculate the poseidon hash from 10 selected fields in the aux inputs.
     pub fn calculate_all_inputs_hash(&self) -> Result<String, FastCryptoError> {
         // TODO(joyqvq): check each string for bigint is valid.
         let mut poseidon = PoseidonWrapper::new();
-        let jwt_sha2_hash_0 = Bn254Fr::from_str(&self.jwt_sha2_hash[0]).unwrap();
-        let jwt_sha2_hash_1 = Bn254Fr::from_str(&self.jwt_sha2_hash[1]).unwrap();
-        let masked_content_hash = Bn254Fr::from_str(&self.parsed_masked_content.hash).unwrap();
-        let payload_start_index = Bn254Fr::from_str(&self.payload_start_index.to_string()).unwrap();
-        let payload_len = Bn254Fr::from_str(&self.payload_len.to_string()).unwrap();
+        let addr_seed = Bn254Fr::from_str(&self.addr_seed.to_string()).unwrap();
         let eph_public_key_0 = Bn254Fr::from_str(&self.eph_public_key[0]).unwrap();
         let eph_public_key_1 = Bn254Fr::from_str(&self.eph_public_key[1]).unwrap();
         let max_epoch = Bn254Fr::from_str(&self.max_epoch.to_string()).unwrap();
-        let num_sha2_blocks = Bn254Fr::from_str(&self.num_sha2_blocks.to_string()).unwrap();
-        let addr_seed = Bn254Fr::from_str(&self.addr_seed.to_string()).unwrap();
         let key_claim_name_f = Bn254Fr::from_str(
             SUPPORTED_KEY_CLAIM_TO_FIELD
                 .get(&(self.get_iss(), self.get_claim_name().to_owned()))
                 .unwrap(),
         )
         .unwrap();
+        let iss_f = map_to_field(self.get_iss_str(), MAX_EXTENDED_ISS_LEN_B64)?;
+        let aud_f = map_to_field(self.get_aud_str(), MAX_EXTENDED_AUD_LEN_B64)?;
+        let header_f = map_to_field(self.get_header(), MAX_HEADER_LEN)?;
+
+        let iss_index = Bn254Fr::from_str(&self.get_iss_index().to_string()).unwrap();
+        let aud_index = Bn254Fr::from_str(&self.get_aud_index().to_string()).unwrap();
+
         Ok(poseidon
             .hash(vec![
-                jwt_sha2_hash_0,
-                jwt_sha2_hash_1,
-                masked_content_hash,
-                payload_start_index,
-                payload_len,
+                addr_seed,
                 eph_public_key_0,
                 eph_public_key_1,
                 max_epoch,
-                num_sha2_blocks,
                 key_claim_name_f,
-                addr_seed,
+                iss_f,
+                iss_index,
+                aud_f,
+                aud_index,
+                header_f,
             ])?
             .to_string())
     }
 }
 
+fn map_to_field(input: &str, max_size: u8) -> Result<Bn254Fr, FastCryptoError> {
+    if input.len() > max_size as usize {
+        return Err(FastCryptoError::InvalidInput);
+    }
+
+    let num_elements = max_size / (PACK_WIDTH / 8) + 1;
+    println!("input: {:?} {:?} {:?}", input, max_size, num_elements);
+    let in_arr: Vec<BigUint> = input
+        .chars()
+        .map(|c| BigUint::from_slice(&([c as u32])))
+        .collect();
+    println!(
+        "in arr {:?}",
+        in_arr
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+    );
+    let packed = pack2(&in_arr, 8, PACK_WIDTH, num_elements)?;
+    println!(
+        "packed2: {:?}",
+        packed
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+    );
+    to_poseidon_hash(packed)
+}
+
+fn pack2(
+    in_arr: &[BigUint],
+    in_width: u8,
+    out_width: u8,
+    out_count: u8,
+) -> Result<Vec<Bn254Fr>, FastCryptoError> {
+    let packed = pack(in_arr, in_width as usize, out_width as usize)?;
+    println!(
+        "packed: {:?}",
+        packed
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+    );
+    if packed.len() > out_count as usize {
+        return Err(FastCryptoError::InvalidInput);
+    }
+
+    let mut padded = packed.clone();
+    padded.extend(vec![
+        Bn254Fr::from_str("0").unwrap();
+        out_count as usize - packed.len() as usize
+    ]);
+    Ok(padded)
+}
+
+fn pack(
+    in_arr: &[BigUint],
+    in_width: usize,
+    out_width: usize,
+) -> Result<Vec<Bn254Fr>, FastCryptoError> {
+    let bits = big_int_array_to_bits(in_arr, in_width);
+    println!("bits: {:?}", bits.len());
+    let extra_bits = if bits.len() % out_width == 0 {
+        0
+    } else {
+        out_width - (bits.len() % out_width)
+    };
+    println!("extra_bits: {:?}", extra_bits);
+
+    let mut bits_padded = bits;
+    bits_padded.extend(vec![false; extra_bits]);
+
+    if bits_padded.len() % out_width != 0 {
+        return Err(FastCryptoError::InvalidInput);
+    }
+
+    Ok(bits_padded
+        .chunks(out_width)
+        .map(|chunk| {
+            let f = bitarray_to_bytearray(chunk);
+            let st = BigUint::from_radix_be(&f, 2).unwrap().to_string();
+            Bn254Fr::from_str(&st).unwrap()
+        })
+        .collect())
+}
+
+fn big_int_array_to_bits(arr: &[BigUint], int_size: usize) -> Vec<bool> {
+    let mut bitarray: Vec<bool> = Vec::new();
+
+    for num in arr {
+        let mut binary_str = num.to_str_radix(2);
+        if binary_str.len() < int_size {
+            let padding = "0".repeat(int_size - binary_str.len());
+            binary_str = format!("{}{}", padding, binary_str);
+        }
+        let bits: Vec<bool> = binary_str.chars().map(|c| c == '1').collect();
+        bitarray.extend(bits)
+    }
+    bitarray
+}
+
 /// A structed of all parsed and validated values from the masked content bytes.
 #[derive(Default, Debug, Clone, PartialEq, Eq, JsonSchema, Hash, Serialize, Deserialize)]
 pub struct ParsedMaskedContent {
-    header: JWTHeader,
+    kid: String,
+    header: String,
     iss: String,
-    client_id: String,
-    hash: String,
+    aud: String,
+    iss_str: String,
+    aud_str: String,
+    iss_index: u8,
+    aud_index: u8,
 }
 
 /// Struct that represents a standard JWT header according to
@@ -377,92 +396,64 @@ pub struct JWTHeader {
     typ: String,
 }
 
+impl JWTHeader {
+    /// Parse the header base64 string into a [struct JWTHeader].
+    pub fn new(header_base64: &str) -> Result<Self, FastCryptoError> {
+        let header_bytes = Base64UrlUnpadded::decode_vec(header_base64)
+            .map_err(|_| FastCryptoError::InvalidInput)?;
+        let header_str =
+            std::str::from_utf8(&header_bytes).map_err(|_| FastCryptoError::InvalidInput)?;
+        let header: JWTHeader =
+            serde_json::from_str(header_str).map_err(|_| FastCryptoError::InvalidInput)?;
+        Ok(header)
+    }
+}
 impl ParsedMaskedContent {
-    /// Parse the masked content bytes into a [struct ParsedMaskedContent].
-    /// payload_start_index, payload_len, num_sha2_blocks are used for
-    /// validation and parsing.
-    pub fn new(
-        masked_content: &[u8],
-        payload_start_index: u16,
-        payload_len: u16,
-        num_sha2_blocks: u8,
-    ) -> Result<Self, FastCryptoError> {
-        // Verify the bytes after 64 * num_sha2_blocks should be all 0s.
-        if !masked_content
-            .get(64 * num_sha2_blocks as usize..)
-            .ok_or(FastCryptoError::InvalidInput)?
-            .iter()
-            .all(|&x| x == 0)
-        {
-            return Err(FastCryptoError::GeneralError(
-                "Incorrect payload padding".to_string(),
-            ));
+    /// Read a list of Claims and header string and parse them into fields
+    /// header, iss, iss_index, aud, aud_index.
+    pub fn new(header_base64: &str, claims: &[Claim]) -> Result<Self, FastCryptoError> {
+        let header = JWTHeader::new(header_base64)?;
+        if header.alg != "RS256" || header.typ != "JWT" {
+            return Err(FastCryptoError::GeneralError("Invalid header".to_string()));
         }
 
-        let masked_content_tmp = masked_content
-            .get(..64 * num_sha2_blocks as usize)
-            .ok_or(FastCryptoError::InvalidInput)?;
-
-        // Verify the byte at payload start index is indeed b'.'.
-        if payload_start_index < 1
-            || masked_content_tmp.get(payload_start_index as usize - 1) != Some(&b'.')
-        {
-            return Err(FastCryptoError::GeneralError(
-                "Incorrect payload index for separator".to_string(),
-            ));
+        let mut iss = None;
+        let mut aud = None;
+        for claim in claims {
+            match claim.name.as_str() {
+                "iss" => {
+                    iss = Some((
+                        decode_base64_url(&claim.value_base64, &claim.index_mod_4)?,
+                        claim.value_base64.clone(),
+                        claim.index_mod_4,
+                    ));
+                }
+                "aud" => {
+                    aud = Some((
+                        decode_base64_url(&claim.value_base64, &claim.index_mod_4)?,
+                        claim.value_base64.clone(),
+                        claim.index_mod_4,
+                    ));
+                }
+                _ => {
+                    return Err(FastCryptoError::GeneralError(
+                        "Invalid claim name".to_string(),
+                    ));
+                }
+            }
         }
+        let iss_val = iss.ok_or(FastCryptoError::InvalidInput)?;
+        let aud_val = aud.ok_or(FastCryptoError::InvalidInput)?;
 
-        let header = parse_and_validate_header(
-            masked_content_tmp
-                .get(0..payload_start_index as usize - 1)
-                .ok_or_else(|| {
-                    FastCryptoError::GeneralError(
-                        "Invalid payload index to parse header".to_string(),
-                    )
-                })?,
-        )?;
-
-        // Parse the jwt length from the last 8 bytes of the masked content.
-        let jwt_length_bytes = masked_content_tmp
-            .get(masked_content_tmp.len() - 8..)
-            .ok_or_else(|| FastCryptoError::GeneralError("Invalid last 8 bytes".to_string()))?;
-        let jwt_length = calculate_value_from_bytearray(jwt_length_bytes);
-
-        // Verify the jwt length equals to 8*(payload_start_index + payload_len).
-        if jwt_length != 8 * (payload_start_index as usize + payload_len as usize) {
-            return Err(FastCryptoError::GeneralError(
-                "Incorrect jwt length".to_string(),
-            ));
-        }
-
-        // Parse sha2 pad into a bit array.
-        let sha_2_pad = bytearray_to_bits(
-            &masked_content_tmp[payload_start_index as usize + payload_len as usize..],
-        );
-
-        // Verify that the first bit of the bit array of sha2 pad is 1.
-        if !sha_2_pad[0] {
-            return Err(FastCryptoError::GeneralError(
-                "Incorrect sha2 padding".to_string(),
-            ));
-        }
-
-        // Verify the count of 0s in the sha2 pad bit array satifies the condition
-        // with the jwt length.
-        validate_zeros_count(&sha_2_pad, jwt_length)?;
-
-        // Splits the masked payload into 3 parts (that reveals iss, aud, nonce respectively)
-        // separated by a delimiter of "=" of any length. With padding etc
-        let parts = find_parts_and_indices(
-            &masked_content_tmp
-                [payload_start_index as usize..payload_start_index as usize + payload_len as usize],
-        )?;
-
-        Ok(Self {
-            header,
-            iss: parts[0].to_string(),
-            client_id: parts[1].to_string(),
-            hash: calculate_merklized_hash(masked_content)?,
+        Ok(ParsedMaskedContent {
+            kid: header.kid,
+            header: header_base64.to_string(),
+            iss: verify_extended_claim(&iss_val.0.to_string(), "iss")?,
+            aud: verify_extended_claim(&aud_val.0.to_string(), "aud")?,
+            iss_str: iss_val.1,
+            aud_str: aud_val.1,
+            iss_index: iss_val.2,
+            aud_index: aud_val.2,
         })
     }
 
@@ -471,17 +462,113 @@ impl ParsedMaskedContent {
         &self.iss
     }
 
-    /// Get the kid string value.
-    pub fn get_kid(&self) -> &str {
-        &self.header.kid
+    /// Get the aud string value.
+    pub fn get_aud(&self) -> &str {
+        &self.aud
     }
 
-    /// Get the client id string value.
-    pub fn get_client_id(&self) -> &str {
-        &self.client_id
+    /// Get the iss string value.
+    pub fn get_iss_str(&self) -> &str {
+        &self.iss_str
+    }
+
+    /// Get the aud string value.
+    pub fn get_aud_str(&self) -> &str {
+        &self.aud_str
+    }
+
+    /// Get the iss index value.
+    pub fn get_iss_index(&self) -> u8 {
+        self.iss_index
+    }
+
+    /// Get the aud index value.
+    pub fn get_aud_index(&self) -> u8 {
+        self.aud_index
+    }
+
+    /// Get the Base64 header string value.
+    pub fn get_header(&self) -> &str {
+        &self.header
+    }
+
+    /// Get kid string from header.
+    pub fn get_kid(&self) -> &str {
+        &self.kid
     }
 }
 
+fn verify_extended_claim(
+    extended_claim: &str,
+    expected_key: &str,
+) -> Result<String, FastCryptoError> {
+    // Last character of each extracted_claim must be '}' or ','
+    if !(extended_claim.ends_with('}') || extended_claim.ends_with(',')) {
+        return Err(FastCryptoError::InvalidInput);
+    }
+
+    let json_str = format!("{{{}}}", &extended_claim[..extended_claim.len() - 1]);
+    let json: Value = serde_json::from_str(&json_str).map_err(|_| FastCryptoError::InvalidInput)?;
+
+    if json.as_object().map(|obj| obj.len()) != Some(1) {
+        return Err(FastCryptoError::InvalidInput);
+    }
+    let key = json.as_object().unwrap().keys().next().unwrap();
+    if key != expected_key {
+        return Err(FastCryptoError::InvalidInput);
+    }
+    let value = json[key].as_str().unwrap();
+    Ok(value.to_string())
+}
+fn decode_base64_url(s: &str, i: &u8) -> Result<String, FastCryptoError> {
+    if s.len() < 2 {
+        return Err(FastCryptoError::GeneralError(
+            "Length smaller than 2".to_string(),
+        ));
+    }
+    let mut bits = base64_to_bitarray(s);
+    let first_char_offset = i % 4;
+    match first_char_offset {
+        0 => {}
+        1 => {
+            bits.drain(..2);
+        }
+        2 => {
+            bits.drain(..4);
+        }
+        _ => {
+            return Err(FastCryptoError::GeneralError(
+                "Invalid first_char_offset".to_string(),
+            ));
+        }
+    }
+
+    let last_char_offset = (i + s.len() as u8 - 1) % 4;
+    match last_char_offset {
+        3 => {}
+        2 => {
+            bits.drain(bits.len() - 2..);
+        }
+        1 => {
+            bits.drain(bits.len() - 4..);
+        }
+        _ => {
+            return Err(FastCryptoError::GeneralError(
+                "Invalid last_char_offset".to_string(),
+            ));
+        }
+    }
+
+    if bits.len() % 8 != 0 {
+        return Err(FastCryptoError::GeneralError(
+            "Invalid bits length".to_string(),
+        ));
+    }
+
+    Ok(std::str::from_utf8(&bits_to_bytes(&bits))
+        .map_err(|_| FastCryptoError::GeneralError("Invalid masked content".to_string()))?
+        .to_owned())
+}
 /// The zk login proof.
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct ZkLoginProof {
@@ -540,82 +627,6 @@ impl PublicInputs {
     }
 }
 
-/// Parse the ascii string from the input bytearray and split it by delimiter "=" of any
-/// length. Return a list of the split parts and a list of start indices of each part.
-fn find_parts_and_indices(input: &[u8]) -> Result<Vec<String>, FastCryptoError> {
-    let input_str = std::str::from_utf8(input)
-        .map_err(|_| FastCryptoError::GeneralError("Invalid masked content".to_string()))?;
-    let re = Regex::new("=+").expect("Regex string should be valid");
-
-    let mut chunks = Vec::new();
-    let mut start_idx = 0;
-
-    for mat in re.find_iter(input_str) {
-        let end_idx = mat.start();
-        if start_idx < end_idx {
-            if start_idx % 4 == 3 || end_idx % 4 == 0 {
-                return Err(FastCryptoError::GeneralError(
-                    "Invalid start or end index".to_string(),
-                ));
-            }
-            let mut chunk_in_bits: Vec<bool> = base64_to_bitarray(&input_str[start_idx..end_idx]);
-            let original_len = chunk_in_bits.len();
-            if start_idx % 4 == 1 {
-                chunk_in_bits.drain(..2);
-            } else if start_idx % 4 == 2 {
-                chunk_in_bits.drain(..4);
-            }
-
-            if end_idx % 4 == 1 {
-                chunk_in_bits.drain(original_len - 4..);
-            } else if end_idx % 4 == 2 {
-                chunk_in_bits.drain(original_len - 2..);
-            };
-
-            let bytearray = bits_to_bytes(&chunk_in_bits);
-            let input_str = std::str::from_utf8(&bytearray).map_err(|_| {
-                FastCryptoError::GeneralError("Invalid bytearray from tweaked bits".to_string())
-            })?;
-            chunks.push(input_str.to_string());
-        }
-        start_idx = mat.end();
-    }
-    Ok(vec![
-        find_value(&chunks[0], "\"iss\":\"", "\",")?,
-        find_value(&chunks[1], "\"aud\":\"", "\",")?,
-    ])
-}
-
-/// Given a part in string, find the value between the prefix and suffix.
-/// The index value is used to decide the number of '0' needed to pad to
-/// make the parts an valid Base64 encoding.
-fn find_value(ascii_string: &str, prefix: &str, suffix: &str) -> Result<String, FastCryptoError> {
-    let start = ascii_string
-        .find(prefix)
-        .ok_or_else(|| FastCryptoError::GeneralError("Invalid parts prefix".to_string()))?
-        + prefix.len();
-    let end = ascii_string[start..]
-        .find(suffix)
-        .ok_or_else(|| FastCryptoError::GeneralError("Invalid ascii suffix".to_string()))?
-        + start;
-    Ok(ascii_string[start..end].to_string())
-}
-
-/// Count the number of 0s in the bit array and check if the count satifies as the
-/// smallest, non-negative solution to equation jwt_length + 1 + K = 448 (mod 512).
-/// See more at 4.1(b) https://datatracker.ietf.org/doc/html/rfc4634#section-4.1
-fn validate_zeros_count(arr: &[bool], jwt_length: usize) -> Result<(), FastCryptoError> {
-    // Count the number of 0s in the bitarray excluding the last 8 bytes (64 bits).
-    let count = arr.iter().take(arr.len() - 64).filter(|&bit| !bit).count();
-    if (jwt_length + 1 + count) % 512 == 448 && count < 512 {
-        Ok(())
-    } else {
-        Err(FastCryptoError::GeneralError(
-            "Invalid bitarray".to_string(),
-        ))
-    }
-}
-
 /// Map a base64 string to a bit array by taking each char's index and covert it to binary form.
 fn base64_to_bitarray(input: &str) -> Vec<bool> {
     let base64_url_character_set =
@@ -658,51 +669,51 @@ fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
     bytes
 }
 
-/// Convert a big int string to a big endian bytearray.
-pub fn big_int_str_to_bytes(value: &str) -> Vec<u8> {
-    BigInt::from_str(value)
-        .expect("Invalid big int string")
-        .to_bytes_be()
-        .1
-}
+// /// Convert a big int string to a big endian bytearray.
+// pub fn big_int_str_to_bytes(value: &str) -> Vec<u8> {
+//     BigInt::from_str(value)
+//         .expect("Invalid big int string")
+//         .to_bytes_be()
+//         .1
+// }
 
-/// Calculate the integer value from the bytearray.
-fn calculate_value_from_bytearray(arr: &[u8]) -> usize {
-    let sized: [u8; 8] = arr.try_into().expect("Invalid byte array");
-    ((sized[7] as u16) | (sized[6] as u16) << 8).into()
-}
+// /// Calculate the integer value from the bytearray.
+// fn calculate_value_from_bytearray(arr: &[u8]) -> usize {
+//     let sized: [u8; 8] = arr.try_into().expect("Invalid byte array");
+//     ((sized[7] as u16) | (sized[6] as u16) << 8).into()
+// }
 
-/// Given a chunk of bytearray, parse it as an ascii string and decode as a JWTHeader.
-/// Return the JWTHeader if its fields are valid.
-fn parse_and_validate_header(chunk: &[u8]) -> Result<JWTHeader, FastCryptoError> {
-    let header_str = std::str::from_utf8(chunk)
-        .map_err(|_| FastCryptoError::GeneralError("Cannot parse header string".to_string()))?;
-    let decoded_header = Base64UrlUnpadded::decode_vec(header_str)
-        .map_err(|_| FastCryptoError::GeneralError("Invalid jwt header".to_string()))?;
-    let json_header: Value = serde_json::from_slice(&decoded_header)
-        .map_err(|_| FastCryptoError::GeneralError("Invalid json".to_string()))?;
-    let header: JWTHeader = serde_json::from_value(json_header)
-        .map_err(|_| FastCryptoError::GeneralError("Cannot parse jwt header".to_string()))?;
-    if header.alg != "RS256" || header.typ != "JWT" {
-        Err(FastCryptoError::GeneralError("Invalid header".to_string()))
-    } else {
-        Ok(header)
-    }
-}
+// /// Given a chunk of bytearray, parse it as an ascii string and decode as a JWTHeader.
+// /// Return the JWTHeader if its fields are valid.
+// fn parse_and_validate_header(chunk: &[u8]) -> Result<JWTHeader, FastCryptoError> {
+//     let header_str = std::str::from_utf8(chunk)
+//         .map_err(|_| FastCryptoError::GeneralError("Cannot parse header string".to_string()))?;
+//     let decoded_header = Base64UrlUnpadded::decode_vec(header_str)
+//         .map_err(|_| FastCryptoError::GeneralError("Invalid jwt header".to_string()))?;
+//     let json_header: Value = serde_json::from_slice(&decoded_header)
+//         .map_err(|_| FastCryptoError::GeneralError("Invalid json".to_string()))?;
+//     let header: JWTHeader = serde_json::from_value(json_header)
+//         .map_err(|_| FastCryptoError::GeneralError("Cannot parse jwt header".to_string()))?;
+//     if header.alg != "RS256" || header.typ != "JWT" {
+//         Err(FastCryptoError::GeneralError("Invalid header".to_string()))
+//     } else {
+//         Ok(header)
+//     }
+// }
 
 /// Calculate the merklized hash of the given bytes after 0 paddings.
 pub fn calculate_merklized_hash(bytes: &[u8]) -> Result<String, FastCryptoError> {
     let mut bitarray = bytearray_to_bits(bytes);
     pad_bitarray(&mut bitarray, 248);
     let bigints = convert_to_bigints(&bitarray, 248);
-    to_poseidon_hash(bigints)
+    Ok(to_poseidon_hash(bigints)?.to_string())
 }
 
 /// Calculate the hash of the inputs.
-pub fn to_poseidon_hash(inputs: Vec<Bn254Fr>) -> Result<String, FastCryptoError> {
+pub fn to_poseidon_hash(inputs: Vec<Bn254Fr>) -> Result<Bn254Fr, FastCryptoError> {
     if inputs.len() <= 15 {
         let mut poseidon1: PoseidonWrapper = PoseidonWrapper::new();
-        Ok(poseidon1.hash(inputs)?.to_string())
+        poseidon1.hash(inputs)
     } else if inputs.len() <= 30 {
         let mut poseidon1: PoseidonWrapper = PoseidonWrapper::new();
         let hash1 = poseidon1.hash(inputs[0..15].to_vec())?;
@@ -711,13 +722,12 @@ pub fn to_poseidon_hash(inputs: Vec<Bn254Fr>) -> Result<String, FastCryptoError>
         let hash2 = poseidon2.hash(inputs[15..].to_vec())?;
 
         let mut poseidon3 = PoseidonWrapper::new();
-        let hash_final = poseidon3.hash([hash1, hash2].to_vec());
-
-        Ok(hash_final?.to_string())
+        poseidon3.hash([hash1, hash2].to_vec())
     } else {
         Err(FastCryptoError::InvalidInput)
     }
 }
+
 /// Convert a bytearray to a bitarray.
 fn bytearray_to_bits(bytearray: &[u8]) -> Vec<bool> {
     bytearray
@@ -727,7 +737,7 @@ fn bytearray_to_bits(bytearray: &[u8]) -> Vec<bool> {
 }
 
 /// Convert a bitarray to a bytearray.
-fn bitarray_to_string(bitarray: &[bool]) -> Vec<u8> {
+fn bitarray_to_bytearray(bitarray: &[bool]) -> Vec<u8> {
     bitarray.iter().map(|&b| u8::from(b)).collect()
 }
 
@@ -748,7 +758,7 @@ fn convert_to_bigints(bitarray: &[bool], segment_size: usize) -> Vec<Bn254Fr> {
             for (i, &bit) in chunk.iter().enumerate() {
                 bytes[i / 8] |= (bit as u8) << (7 - i % 8);
             }
-            let f = bitarray_to_string(chunk);
+            let f = bitarray_to_bytearray(chunk);
             let st = BigUint::from_radix_be(&f, 2).unwrap().to_string();
             Bn254Fr::from_str(&st).unwrap()
         })
