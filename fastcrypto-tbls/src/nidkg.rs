@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::dl_verification::{verify_deg_t_poly, verify_pairs, verify_triplets};
+use crate::dl_verification::{
+    get_random_scalars, verify_deg_t_poly, verify_equal_exponents, verify_pairs, verify_triplets,
+};
 use crate::ecies;
 use crate::ecies::RecoveryPackage;
 use crate::polynomial::{Eval, Poly, PrivatePoly};
 use crate::random_oracle::RandomOracle;
 use crate::types::ShareIndex;
 use fastcrypto::error::{FastCryptoError, FastCryptoResult};
-use fastcrypto::groups::{GroupElement, HashToGroupElement, MultiScalarMul, Scalar};
+use fastcrypto::groups::{bls12381, GroupElement, HashToGroupElement, MultiScalarMul, Scalar};
 use fastcrypto::hmac::{hmac_sha3_256, HmacKey};
 use fastcrypto::traits::{AllowedRng, ToFromBytes};
 use itertools::izip;
@@ -17,11 +19,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::iter::Map;
 use std::num::NonZeroU32;
-use std::ops::RangeInclusive;
+use std::ops::{Mul, RangeInclusive};
 
 // TODOs:
 // sign, etc
-// work in G1
 
 type PartyId = u16;
 
@@ -505,5 +506,23 @@ where
     #[cfg(test)]
     pub fn modify_message_swap_partial_pks(message: &mut Message<G>, i: usize, j: usize) {
         message.partial_pks.swap(i, j);
+    }
+}
+
+impl Party<bls12381::G1Element> {
+    /// *4. [optional] Create the partial public key in bls12381::G2Element.
+    pub fn create_partial_pks_in_g2(&self) -> Vec<bls12381::G2Element> {
+        self.share_ids_iter()
+            .map(|i| bls12381::G2Element::generator() * self.vss_sk.eval(i).value)
+            .collect()
+    }
+
+    /// 5*. [optional] Verify the partial pk in bls12381::G2Element.
+    pub fn verify_partial_pks_in_g2<R: AllowedRng>(
+        msg: &Message<bls12381::G1Element>,
+        partial_pk: &[bls12381::G2Element],
+        rng: &mut R,
+    ) -> FastCryptoResult<()> {
+        verify_equal_exponents(&msg.partial_pks, partial_pk, rng)
     }
 }

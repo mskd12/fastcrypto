@@ -1,8 +1,9 @@
 use crate::polynomial::PrivatePoly;
 use fastcrypto::error::{FastCryptoError, FastCryptoResult};
-use fastcrypto::groups::{GroupElement, MultiScalarMul};
+use fastcrypto::groups::{bls12381, GroupElement, MultiScalarMul, Pairing, Scalar};
 use fastcrypto::traits::AllowedRng;
 use std::num::NonZeroU32;
+use std::ops::Mul;
 
 /// Helper functions for checking relations between scalars and group elements.
 
@@ -97,6 +98,28 @@ pub fn verify_deg_t_poly<G: GroupElement + MultiScalarMul, R: AllowedRng>(
         .collect::<Vec<_>>();
     let lhs = G::multi_scalar_mul(&coefficients[..], values).expect("sizes match");
     if lhs != G::zero() {
+        return Err(FastCryptoError::InvalidProof);
+    }
+    Ok(())
+}
+
+/// Checks if vectors v1=(a1*G1, ..., an*G1) and v2=(a1'*G2, ..., an'*G2) use ai = ai' for all i, by
+/// computing <v1, e> and <v2, e> for a random e and checking if they are equal using pairing.
+pub fn verify_equal_exponents<R: AllowedRng>(
+    g1: &[bls12381::G1Element],
+    g2: &[bls12381::G2Element],
+    rng: &mut R,
+) -> FastCryptoResult<()> {
+    if g1.len() != g2.len() {
+        return Err(FastCryptoError::InvalidProof);
+    }
+    let rs = get_random_scalars::<bls12381::G1Element, R>(g1.len() as u32, rng);
+    let lhs = bls12381::G1Element::multi_scalar_mul(&rs[..], g1).expect("sizes match");
+    let rhs = bls12381::G2Element::multi_scalar_mul(&rs[..], g2).expect("sizes match");
+
+    if lhs.pairing(&bls12381::G2Element::generator())
+        != bls12381::G1Element::generator().pairing(&rhs)
+    {
         return Err(FastCryptoError::InvalidProof);
     }
     Ok(())

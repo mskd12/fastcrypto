@@ -135,7 +135,7 @@ impl<G: GroupElement + Serialize> Encryption<G> {
         self.decrypt_from_partial_decryption(&partial_key)
     }
 
-    fn decrypt_from_partial_decryption(&self, partial_key: &G) -> Vec<u8> {
+    pub fn decrypt_from_partial_decryption(&self, partial_key: &G) -> Vec<u8> {
         let hkdf_result = Self::hkdf(partial_key);
         let cipher = Aes256Ctr::new(
             AesKey::<U32>::from_bytes(&hkdf_result)

@@ -6,7 +6,6 @@ use fastcrypto::groups::bls12381;
 use fastcrypto_tbls::ecies;
 use fastcrypto_tbls::nidkg::{Node, Party};
 use fastcrypto_tbls::random_oracle::RandomOracle;
-use fastcrypto_tbls::types::ShareIndex;
 use rand::thread_rng;
 
 type G = bls12381::G1Element;
@@ -73,6 +72,7 @@ mod nidkg_benches {
                 let d0 = setup_party(0, t, &keys);
                 let d1 = setup_party(1, t, &keys);
                 let m = d0.create_message(&mut thread_rng());
+                println!("Message size: {}", bcs::to_bytes(&m).unwrap().len());
 
                 verify.bench_function(format!("n={}, t={}", n, t).as_str(), |b| {
                     b.iter(|| d1.verify_message(&m, &mut thread_rng()))
@@ -92,6 +92,45 @@ mod nidkg_benches {
 
                 verify.bench_function(format!("n={}, t={}", n, t).as_str(), |b| {
                     b.iter(|| d1.process_message(&m, &mut thread_rng()))
+                });
+            }
+        }
+
+        // comment out if G=G2
+        {
+            let mut verify: BenchmarkGroup<_> =
+                c.benchmark_group("NI-DKG generate partial pks in g2");
+            for n in SIZES {
+                let t = (n / 2) as u32;
+                let keys = gen_ecies_keys(n);
+                let d0 = setup_party(0, t, &keys);
+                let d1 = setup_party(1, t, &keys);
+                let m = d0.create_message(&mut thread_rng());
+
+                verify.bench_function(format!("n={}, t={}", n, t).as_str(), |b| {
+                    b.iter(|| d1.create_partial_pks_in_g2())
+                });
+            }
+        }
+        {
+            let mut verify: BenchmarkGroup<_> =
+                c.benchmark_group("NI-DKG verify partial pks in g2");
+            for n in SIZES {
+                let t = (n / 2) as u32;
+                let keys = gen_ecies_keys(n);
+                let d0 = setup_party(0, t, &keys);
+                let pks_in_g2 = d0.create_partial_pks_in_g2();
+                println!(
+                    "pks_in_g2 size: {}",
+                    bcs::to_bytes(&pks_in_g2).unwrap().len()
+                );
+                let d1 = setup_party(1, t, &keys);
+                let m = d0.create_message(&mut thread_rng());
+
+                verify.bench_function(format!("n={}, t={}", n, t).as_str(), |b| {
+                    b.iter(|| {
+                        Party::<G>::verify_partial_pks_in_g2(&m, &pks_in_g2, &mut thread_rng())
+                    })
                 });
             }
         }

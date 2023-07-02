@@ -83,6 +83,11 @@ fn test_dkg_e2e_4_parties_threshold_2() {
     let (share2, complaints2) = d2.process_message(&m2, &mut rng);
     // TODO: tests complaints, etc
 
+    let partial_pks_in_g2 = d0.create_partial_pks_in_g2();
+    assert!(
+        Party::<G1Element>::verify_partial_pks_in_g2(&m0, &partial_pks_in_g2, &mut rng).is_ok()
+    );
+
     //
     // // Use the shares from 01 and o4 to sign a message.
     // type S = ThresholdBls12381MinSig;
